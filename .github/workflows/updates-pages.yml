@@ -1,0 +1,110 @@
+name: Build and publish updater feed
+
+on:
+  release:
+    types: [published, edited, deleted, unpublished, released, prereleased]
+  push:
+    branches: [main]
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/updates-pages.yml'
+  pull_request:
+    paths:
+      - 'scripts/**'
+      - 'tests/**'
+      - '.github/workflows/updates-pages.yml'
+  schedule:
+    # Refresh assets and releases even when a change does not emit a release event.
+    - cron: '23 * * * *'
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: 'Publish to Pages (requires UPDATES_PAGES_ENABLED=true)'
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: updater-pages-${{ github.event_name == 'pull_request' && github.event.number || 'publish' }}
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    outputs:
+      sha256: ${{ steps.feed.outputs.sha256 }}
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          # Release tags can refer to an old commit; use the maintained generator.
+          ref: ${{ github.event_name == 'release' && github.event.repository.default_branch || '' }}
+          persist-credentials: false
+      - name: Record source commit
+        id: source
+        shell: bash
+        run: printf 'sha=%s\n' "$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Test generator and HTTP verification
+        run: python -m unittest discover -s tests -v
+      - name: Generate public release feed
+        id: feed
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/build_updates.py
+          --repository gers-sw-team/survey-correction-updates
+          --output-dir _site
+          --github-output "$GITHUB_OUTPUT"
+      - name: Upload Pages artifact
+        uses: actions/upload-pages-artifact@7b1f4a764d45c48632c6b24a0339c27f5614fb0b # v4
+        with:
+          path: _site
+
+  deploy:
+    needs: build
+    if: >-
+      github.repository == 'gers-sw-team/survey-correction-updates' &&
+      github.event_name != 'pull_request' &&
+      vars.UPDATES_PAGES_ENABLED == 'true' &&
+      (github.event_name != 'workflow_dispatch' || inputs.publish)
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Check out the exact verified source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.build.outputs.source_sha }}
+          persist-credentials: false
+      - name: Set up Python
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: '3.12'
+      - name: Configure Pages
+        uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - name: Deploy Pages artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+      - name: Verify the published bytes
+        env:
+          PAGE_URL: ${{ steps.deployment.outputs.page_url }}
+          EXPECTED_SHA256: ${{ needs.build.outputs.sha256 }}
+        run: >-
+          python scripts/verify_updates.py
+          --url "${PAGE_URL%/}/updates.json"
+          --sha256 "$EXPECTED_SHA256"
