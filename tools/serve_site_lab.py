@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Serve only generated feed metadata on loopback for updater integration tests."""
 import argparse
+import contextlib
+import socket
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
@@ -44,6 +46,15 @@ def main():
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
+        def finish(self):
+            # Gracefully finish metadata and blocked-download responses on Windows.
+            with contextlib.suppress(OSError):
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                self.connection.settimeout(1)
+                while self.connection.recv(1024):
+                    pass
+            super().finish()
         def log_message(self, fmt, *values):
             with args.requests_log.open("a", encoding="utf-8") as stream:
                 stream.write(json.dumps({"time": datetime.now(timezone.utc).isoformat(),

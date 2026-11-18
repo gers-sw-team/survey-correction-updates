@@ -19,6 +19,7 @@ from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_ope
 
 API_VERSION = "2022-11-28"
 INSTALLER_SUFFIXES = (".exe", ".msi", ".msp")
+FIRST_X64_INSTALLER_VERSION = (1, 16, 2)
 RETRY_STATUSES = {429, 500, 502, 503, 504}
 
 
@@ -122,9 +123,17 @@ def prepare_releases(source):
             raise FeedError(f"Release {tag} has no valid asset list")
         installers = [a for a in assets if isinstance(a.get("name"), str)
                       and a["name"].lower().endswith(INSTALLER_SUFFIXES)]
-        if not installers:
-            raise FeedError(f"Release {tag} has no installer asset")
-        required_assets = [installers[0]] + [a for a in assets if a.get("name") == "advinst_update.json"]
+        if len(installers) != 1:
+            raise FeedError(f"Release {tag} must have exactly one installer asset")
+        if not re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", tag):
+            raise FeedError(f"Release {tag} must use a numeric major.minor.patch tag")
+        version = tuple(int(part) for part in tag.split("."))
+        metadata = [a for a in assets if a.get("name") == "advinst_update.json"]
+        # Historic x86 packages used the default 32-bit registry detection.
+        # Native x64 packages require explicit Sys64 metadata from their build.
+        if len(metadata) > 1 or (version >= FIRST_X64_INSTALLER_VERSION and not metadata):
+            raise FeedError(f"Release {tag} must include exactly one advinst_update.json asset")
+        required_assets = [installers[0]] + metadata
         for asset in required_assets:
             if (asset.get("state") != "uploaded" or type(asset.get("size")) is not int
                     or asset["size"] <= 0 or not valid_url(asset.get("browser_download_url"))):

@@ -11,6 +11,8 @@ from urllib.request import Request, urlopen
 
 
 def verify(url, expected_sha256, *, attempts=10, delay=3):
+    if not 1 <= attempts <= 180 or not 0 <= delay <= 10:
+        raise ValueError("Retry count must be 1..180 and delay must be 0..10 seconds")
     if len(expected_sha256) != 64 or any(c not in "0123456789abcdef" for c in expected_sha256):
         raise ValueError("Expected SHA-256 must be 64 lowercase hexadecimal characters")
     parts = urlsplit(url)
@@ -44,9 +46,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--url", required=True)
     parser.add_argument("--sha256", required=True)
+    parser.add_argument("--attempts", type=int, default=10)
+    parser.add_argument("--delay", type=float, default=3)
     args = parser.parse_args()
     try:
-        print(json.dumps(verify(args.url, args.sha256), ensure_ascii=True))
+        print(json.dumps(verify(args.url, args.sha256, attempts=args.attempts, delay=args.delay), ensure_ascii=True))
         return 0
     except ValueError as error:
         print(f"error: {error}", file=sys.stderr)

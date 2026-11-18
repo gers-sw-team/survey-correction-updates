@@ -3,6 +3,7 @@ import copy
 import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import socket
 from pathlib import Path
 import sys
 import tempfile
@@ -23,7 +24,9 @@ def release(number=1, body="## Features\n- Добавлено автосохра
             "author": {"login": "maintainer", "name": "Инженер"},
             "assets": [{"id": number * 10, "name": f"Survey.Correction-Setup-1.17.{number}.exe",
                         "size": 190824144, "state": "uploaded", "digest": "sha256:" + "a" * 64,
-                        "browser_download_url": f"https://github.com/test/repo/releases/download/1.17.{number}/setup.exe"}],
+                        "browser_download_url": f"https://github.com/test/repo/releases/download/1.17.{number}/setup.exe"},
+                       {"name": "advinst_update.json", "size": 256, "state": "uploaded",
+                        "browser_download_url": f"https://github.com/test/repo/releases/download/1.17.{number}/advinst_update.json"}],
             "future_api_field": {"preserve": [1, True, None]}}
 
 
@@ -41,6 +44,15 @@ def server(respond):
                 self.send_header(key, value)
             self.end_headers()
             self.wfile.write(body)
+            self.wfile.flush()
+            # Let the client consume the response before closing the socket.
+            # An immediate close can reset the connection on Windows and make
+            # otherwise healthy requests exercise the generator's retry path.
+            with contextlib.suppress(OSError):
+                self.connection.shutdown(socket.SHUT_WR)
+                self.connection.settimeout(1)
+                while self.connection.recv(1024):
+                    pass
         def log_message(self, *args):
             pass
     httpd = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
@@ -99,12 +111,61 @@ class SerializationTests(unittest.TestCase):
 
     def test_optional_detection_asset_is_preserved_and_checked(self):
         item = release(body="Description\r\n")
+        item["tag_name"] = "1.16.1"
+        item["assets"].pop()
         item["assets"].append({"name": "advinst_update.json", "size": 42,
                                "state": "uploaded", "browser_download_url": "https://example.org/detection.json"})
         self.assertEqual(feed.prepare_releases([item]), [item])
         item["assets"][1]["state"] = "starter"
         with self.assertRaises(feed.FeedError):
             feed.prepare_releases([item])
+
+    def test_x64_transition_and_future_releases_require_detection_metadata(self):
+        for tag in ("1.16.2", "1.16.10", "1.17.0", "2.0.0"):
+            with self.subTest(tag=tag):
+                item = release()
+                item["tag_name"] = tag
+                item["assets"].pop()
+                with self.assertRaisesRegex(feed.FeedError, "advinst_update.json"):
+                    feed.prepare_releases([item])
+
+    def test_legacy_releases_without_metadata_remain_available(self):
+        for tag in ("1.16.1", "1.16.0", "1.15.4", "1.14.10"):
+            with self.subTest(tag=tag):
+                item = release(body="Legacy release\r\n")
+                item["tag_name"] = tag
+                item["assets"].pop()
+                self.assertEqual(feed.prepare_releases([item]), [item])
+
+    def test_legacy_and_x64_releases_can_share_the_feed(self):
+        legacy, native = release(1), release(2)
+        legacy["tag_name"] = "1.16.1"
+        legacy["assets"].pop()
+        native["tag_name"] = "1.16.2"
+        result = feed.prepare_releases([native, legacy])
+        self.assertEqual([item["tag_name"] for item in result], ["1.16.2", "1.16.1"])
+        self.assertEqual(result[1]["assets"], legacy["assets"])
+        self.assertEqual(result[0]["assets"], native["assets"])
+
+    def test_ambiguous_installer_assets_are_rejected(self):
+        item = release()
+        item["assets"].append(dict(item["assets"][0], name="another-installer.exe"))
+        with self.assertRaisesRegex(feed.FeedError, "exactly one installer"):
+            feed.prepare_releases([item])
+
+    def test_duplicate_detection_assets_are_rejected(self):
+        item = release()
+        item["assets"].append(dict(item["assets"][1]))
+        with self.assertRaisesRegex(feed.FeedError, "exactly one advinst_update.json"):
+            feed.prepare_releases([item])
+
+    def test_nonnumeric_release_tags_are_rejected(self):
+        for tag in ("v1.16.2", "1.16", "1.16.2-x64"):
+            with self.subTest(tag=tag):
+                item = release()
+                item["tag_name"] = tag
+                with self.assertRaisesRegex(feed.FeedError, "numeric major.minor.patch"):
+                    feed.prepare_releases([item])
 
     def test_invalid_source_never_replaces_existing_feed(self):
         with tempfile.TemporaryDirectory() as directory:
