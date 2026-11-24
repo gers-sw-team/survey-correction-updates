@@ -1,0 +1,25 @@
+name: Publish updater feed after release
+
+on:
+  workflow_run:
+    workflows: [Build and publish updater feed]
+    types: [completed]
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    # Rebuild independently: older release-tag runs can fail at their deploy job.
+    # No upstream code, artifacts or caches are used by this publisher.
+    if: >-
+      github.repository == 'gers-sw-team/survey-correction-updates' &&
+      github.event.workflow_run.event == 'release' &&
+      github.event.workflow_run.head_repository.full_name == github.repository
+    uses: ./.github/workflows/updates-pages.yml
+    with:
+      publish: true
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
